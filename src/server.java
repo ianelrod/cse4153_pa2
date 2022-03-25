@@ -2,111 +2,171 @@
 // Email: img56@msstate.edu
 // Student ID: 902-268-372
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InvalidClassException;
+import java.io.ObjectInput;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.net.SocketException;
+import java.net.UnknownHostException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
-import java.util.Arrays;
-import java.util.Random;
 
 public class server {
-    public static void main(String[] args) // args include n_port
-    {
-        System.out.println("Hello World.");
-        int n_port = Integer.parseInt(args[0]);
-        int r_port = genRandomPort();
-        String message = "";
+	public static void main(String[] args) // args include n_port
+	{
+		// declare variable and parse args
+		InetAddress emulatorip = null;
+		try {
+			emulatorip = InetAddress.getByName(args[0]);
+		} catch (UnknownHostException e) {
+			System.out.println("Invalid Server IP.");
+			e.printStackTrace();
+		}
+		int r_port = Integer.parseInt(args[1]);
+		int s_port = Integer.parseInt(args[2]);
+		String filename = args[3];
 
-        // get negotiation from client
-        try {
-            DatagramSocket dsneg = new DatagramSocket(n_port);
-            byte[] ack = new byte[Integer.BYTES];
-            System.out.println("Waiting for client handshake...");
-            DatagramPacket dpnegrec = new DatagramPacket(ack, ack.length);
-            dsneg.receive(dpnegrec);
-            System.out.println("Received client handshake.");
-            DatagramPacket dpnegsend = new DatagramPacket(intToByteArray(r_port), intToByteArray(r_port).length, dpnegrec.getAddress(), dpnegrec.getPort());
-            dsneg.send(dpnegsend);
-            System.out.println("Random port chosen: " + r_port);
-            dsneg.close();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
+		// create sockets
+		try {
+			DatagramSocket s_s = new DatagramSocket();
+			DatagramSocket r_s = new DatagramSocket(r_port);
+	
+			int seqnum = 0;
+	
+			String arrlog = "";
+			String output = "";
+	
+			boolean end = false;
+	
+			do {
+				System.out.println("Waiting for data...");
+				packet p = recvfrom(r_s);
+				if (p.getType() == 3) {
+					arrlog = arrlog.concat(Integer.toString(p.getSeqNum()) + "\n");
+					System.out.println("EOT Received. Sending EOT.");
+					try {
+						s_s.send(conPacket(serialize(conObject(2, seqnum, 0, null)), emulatorip, s_port));
+					} catch (InvalidClassException e) {
+						System.out.println("Could not serialize.");
+						e.printStackTrace();
+					}
+					end = true;
+				} else if (p.getSeqNum() == seqnum) {
+					arrlog = arrlog.concat(Integer.toString(p.getSeqNum()) + "\n");
+					output = output.concat(p.getData());
+					System.out.println("New data recieved. Sending ACK.");
+					try {
+						s_s.send(conPacket(serialize(conObject(0, seqnum, 0, null)), emulatorip, s_port));
+					} catch (InvalidClassException e) {
+						System.out.println("Could not serialize.");
+						e.printStackTrace();
+					}
+					seqnum ^= 1;
+				} else {
+					arrlog = arrlog.concat(Integer.toString(p.getSeqNum()) + "\n");
+					System.out.println("Old data recieved. Resending ACK.");
+					try {
+						s_s.send(conPacket(serialize(conObject(0, p.getSeqNum(), 0, null)), emulatorip, s_port));
+					} catch (InvalidClassException e) {
+						System.out.println("Could not serialize.");
+						e.printStackTrace();
+					}
+				}
+			} while (end == false);
+	
+			write(arrlog, "arrival.log");
+			write(output, filename);
+	
+			s_s.close();
+			r_s.close();
+		} catch (SocketException e) {
+			System.out.println("Could not create socket.");
+			e.printStackTrace();
+		} catch (IOException e) {
+			System.out.println("IO Exception.");
+			e.printStackTrace();
+		}
+	}
 
-        // iterate through file on socket
-        byte[] end = new byte[] {0x03,0x00,0x00,0x00};
-        try {
-            System.out.println("Creating listening socket on random port: " + r_port);
-            DatagramSocket dstrans = new DatagramSocket(r_port);
-            DatagramPacket dptrans;
-            do {
-                dptrans = waittrans(dstrans);
-                if (dptrans.getData() != end) {
-                    String chars = new String(dptrans.getData());
-                    System.out.println("Received chars: " + chars);
-                    message = message.concat(chars);
-                    sendUpperACK(dstrans, dptrans);
-                }
-            } while (!Arrays.equals(dptrans.getData(), end));
-            System.out.println("Writing message to file:\n" + message);
-            write(message);
-            dstrans.close();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
+	// construct packet object given parameters
+	private static packet conObject(int type, int seqnum, int length, String data) {
+		return new packet(type, seqnum, length, data);
+	}
 
-    // generate random port between low (inclusive) and high (exclusive)
-    private static int genRandomPort() {
-        Random r = new Random();
-        int low = 1024;
-        int high = 65536;
-        return r.nextInt(high-low) + low;
-    }
+	private static DatagramPacket conPacket(byte[] b, InetAddress i, int port) {
+		return new DatagramPacket(b, b.length, i, port);
+	}
 
-    // wait for client to transfer data
-    private static DatagramPacket waittrans(DatagramSocket dsocket) throws IOException {
-        byte[] trans = new byte[4];
-        DatagramPacket dtrans = new DatagramPacket(trans, trans.length);
-        dsocket.receive(dtrans);
-        return dtrans;
-    }
+	// generate deserialized packet from serialized byte array
+	private static packet deserialize(byte[] bytes) throws IOException, ClassNotFoundException {
+		ByteArrayInputStream bis = new ByteArrayInputStream(bytes);
+		ObjectInput in = null;
+		try {
+			in = new ObjectInputStream(bis);
+			return (packet) in.readObject();
+		} finally {
+			try {
+				if (in != null) {
+					in.close();
+				}
+			} catch (IOException e) {
+				System.out.println("IO Exception.");
+				e.printStackTrace();
+			}
+		}
+	}
 
-    // send back client data to string upper
-    private static void sendUpperACK(DatagramSocket dsocket, DatagramPacket trans) {
-        // pack bytes into UDP packet
-        String s = new String(trans.getData()).toUpperCase();
-        DatagramPacket dsend = new DatagramPacket(s.getBytes(), s.getBytes().length, trans.getAddress(), trans.getPort());
+	// generate serialized byte array from serializable object
+	private static byte[] serialize(packet p) throws IOException, InvalidClassException {
+		ByteArrayOutputStream bos = new ByteArrayOutputStream();
+		ObjectOutputStream out = null;
+		try {
+			out = new ObjectOutputStream(bos);   
+			out.writeObject(p);
+			out.flush();
+			return bos.toByteArray();
+		} finally {
+			try {
+				bos.close();
+			} catch (IOException e) {
+				System.out.println("IO Exception.");
+				e.printStackTrace();
+			}
+		}
+	}
 
-        // send over port and serverip
-        try {
-            System.out.println("Sending ACK: " + s);
-            dsocket.send(dsend);
-        } catch (IOException e) {
-            System.out.println("Could not send packet.");
-            e.printStackTrace();
-        }
-    }
+	private static packet recvfrom(DatagramSocket r_s) throws IOException {
+		byte[] r_b = new byte[1024];
+		DatagramPacket r_p = new DatagramPacket(r_b, r_b.length);
+		r_s.receive(r_p);
+		byte[] data = new byte[r_p.getLength()];
+		System.arraycopy(r_p.getData(), r_p.getOffset(), data, 0, r_p.getLength());
+		packet rp = null;
+		try {
+			rp = deserialize(data);
+		} catch (ClassNotFoundException e) {
+			System.out.println("Could not deserialize.");
+			e.printStackTrace();
+		}
+		return rp;
+	}
 
-    // write string to file
-    private static void write(String message) {
-        try {
-            // delete upload.txt if it exists
-            Files.deleteIfExists(FileSystems.getDefault().getPath("upload.txt"));
-            // write to upload.txt
-            Files.write(FileSystems.getDefault().getPath("upload.txt"), message.trim().getBytes());
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
-
-    // convert int to byte array
-    public static byte[] intToByteArray(int value) {
-        return new byte[] {
-                (byte)(value >>> 24),
-                (byte)(value >>> 16),
-                (byte)(value >>> 8),
-                (byte)value};
-    }
+	// write string to file
+	private static void write(String message, String filename) {
+		try {
+			// delete upload.txt if it exists
+			Files.deleteIfExists(FileSystems.getDefault().getPath(filename));
+			// write to file
+			Files.write(FileSystems.getDefault().getPath(filename), message.trim().getBytes());
+		} catch (IOException e) {
+			System.out.println("Could not write string to file.");
+			e.printStackTrace();
+		}
+	}
 }
